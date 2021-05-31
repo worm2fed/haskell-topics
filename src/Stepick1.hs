@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
-module Stepick where
+
+module Stepick1 where
 
 import           Data.Char
 import           Data.Function
@@ -500,11 +501,11 @@ data Error = ParsingError | IncompleteDataError | IncorrectDataError String
   deriving Show
 
 
-{- 
+{-
 Строка, которая подается на вход, должна разбивать по символу '\n' на список строк, каждая из которых имеет вид X = Y. Если входная строка не имеет указанный вид, то функция должна возвращать ParsingError.
 Если указаны не все поля, то возвращается IncompleteDataError.
 Если в поле age указано не число, то возвращается IncorrectDataError str, где str — содержимое поля age.
-Если в строке присутствуют лишние поля, то они игнорируются. 
+Если в строке присутствуют лишние поля, то они игнорируются.
 -}
 -- parsePerson :: String -> Either Error Person
 -- parsePerson a = checkFormat $ map (word2cort . splitOn " = ") $ lines a
@@ -635,12 +636,12 @@ b = Val 1 :*: (Val 2 :+: Val 3) :*: Val 4
 --   _               `mappend` _               = Maybe' (Nothing)
 
 
-{- 
-Ниже приведено определение класса MapLike типов, похожих на тип Map. 
+{-
+Ниже приведено определение класса MapLike типов, похожих на тип Map.
 
-Определите представителя MapLike для типа ListMap, определенного ниже как список пар ключ-значение. 
-Для каждого ключа должно храниться не больше одного значения. 
-Функция insert заменяет старое значение новым, если ключ уже содержался в структуре. 
+Определите представителя MapLike для типа ListMap, определенного ниже как список пар ключ-значение.
+Для каждого ключа должно храниться не больше одного значения.
+Функция insert заменяет старое значение новым, если ключ уже содержался в структуре.
 -}
 class MapLike m where
   empty :: m k v
@@ -709,14 +710,14 @@ instance Functor (Map k v) where
 
 data Log a = Log [String] a
   deriving Show
-{- 
+{-
 add1Log = toLogger (+1) "added one"
 add1Log 3 => Log ["added one"] 4
 -}
 toLogger :: (a -> b) -> String -> (a -> Log b)
 toLogger f msg v = Log [msg] $ f v
-{- 
-execLoggers 3 add1Log mult2Log => Log ["added one","multiplied by 2"] 8 
+{-
+execLoggers 3 add1Log mult2Log => Log ["added one","multiplied by 2"] 8
 -}
 execLoggers :: a -> (a -> Log b) -> (b -> Log c) -> Log c
 execLoggers v l1 l2 =
@@ -724,7 +725,7 @@ execLoggers v l1 l2 =
 
 returnLog :: a -> Log a
 returnLog = Log []
-{- 
+{-
 Log ["nothing done yet"] 0 `bindLog` add1Log => Log ["nothing done yet","added one"] 1
  -}
 bindLog :: Log a -> (a -> Log b) -> Log b
@@ -742,8 +743,8 @@ instance Applicative Log where
 instance Monad Log where
   return = returnLog
   (>>=)  = bindLog
-{- 
-execLoggersList 3 [add1Log, mult2Log, \x -> Log ["multiplied by 100"] (x * 100)] => Log ["added one","multiplied by 2","multiplied by 100"] 800 
+{-
+execLoggersList 3 [add1Log, mult2Log, \x -> Log ["multiplied by 100"] (x * 100)] => Log ["added one","multiplied by 2","multiplied by 100"] 800
 -}
 execLoggersList :: a -> [a -> Log a] -> Log a
 execLoggersList a []       = return a
@@ -941,7 +942,7 @@ data Tree a = Leaf a | Fork (Tree a) a (Tree a)
   deriving Show
 
 -- numberTree (Leaf ())
--- Leaf 1     
+-- Leaf 1
 -- numberTree (Fork (Leaf ()) () (Leaf ()))
 -- Fork (Leaf 1) 2 (Leaf 3)
 -- numberTree :: Tree () -> Tree Integer
@@ -951,7 +952,7 @@ data Tree a = Leaf a | Fork (Tree a) a (Tree a)
 --   action = do
 --     (n, tree) <- get
 --     case tree of
---       (Leaf _           ) -> do 
+--       (Leaf _           ) -> do
 --         put (succ n, tree)
 --         Leaf . fst <$> get
 
