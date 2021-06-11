@@ -25,4 +25,5 @@ library
   hs-source-dirs:
     src
   build-depends:
-    base
+      base
+    , bytestring
