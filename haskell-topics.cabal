@@ -21,9 +21,10 @@ executable haskell-topics
 
 library
   exposed-modules:
-    TypeFamilies
+    Stepik2
   hs-source-dirs:
     src
   build-depends:
       base
     , bytestring
+    , parsec
