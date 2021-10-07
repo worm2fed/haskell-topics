@@ -1,3 +1,5 @@
+{-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes#-}
 {-# LANGUAGE TypeOperators #-}
@@ -6,9 +8,11 @@ module Stepik2 where
 
 -- import Text.Parsec (Parsec, char, digit, many1, sepBy)
 import Control.Applicative (ZipList(..), (<**>), Alternative(empty, (<|>)))
+import Control.Monad (ap, MonadPlus (mplus))
 import Data.Char (isDigit)
-import Text.Parsec (Parsec)
 import Data.Monoid (Any(..), All (..), Endo(..), Last (..))
+import Data.Traversable (foldMapDefault)
+import Text.Parsec (Parsec)
 
 
 -- Applicative Functors
@@ -302,3 +306,294 @@ unCmps4
   :: (Functor f2, Functor f1, Functor g, Functor h)
   => (f2 |.| f1 |.| g |.| h) a -> f2 (f1 (g (h a)))
 unCmps4 = fmap (fmap getCmps . getCmps) . getCmps
+
+
+-- Managing Effects
+
+
+-- data Triple a = Tr a a a
+--   deriving (Eq, Show)
+
+instance Foldable Triple where
+  foldr f ini (Tr a b c) = f a $ f b $ f c ini
+  foldl f ini (Tr a b c) = f (f (f ini a) b) c
+
+data Tree a
+  = Nil
+  | Branch (Tree a) a (Tree a)
+  deriving (Eq, Show)
+
+testTree :: Tree Int
+testTree = Branch
+  (Branch
+    (Branch Nil 1 Nil)
+    2
+    (Branch Nil 3 Nil))
+  4
+  (Branch Nil 5 Nil)
+
+-- instance Foldable Tree where
+--   foldr f ini Nil = ini
+--   foldr f ini (Branch l x r) =
+--     foldr f (f x $ foldr f ini r) l
+
+instance Functor Tree where
+  fmap _ Nil = Nil
+  fmap f (Branch l x r) = Branch (fmap f l) (f x) (fmap f r)
+
+newtype Preorder a   = PreO   (Tree a)
+  deriving (Eq, Show)
+newtype Postorder a  = PostO  (Tree a)
+  deriving (Eq, Show)
+newtype Levelorder a = LevelO (Tree a)
+  deriving (Eq, Show)
+
+instance Foldable Preorder where
+  foldr f ini (PreO Nil) = ini
+  foldr f ini (PreO (Branch l x r)) =
+    f x (foldr f (foldr f ini $ PreO r) $ PreO l)
+
+instance Foldable Postorder where
+  foldr f ini (PostO Nil) = ini
+  foldr f ini (PostO (Branch l x r)) =
+    foldr f (foldr f (f x ini) $ PostO r) $ PostO l
+
+instance Foldable Levelorder where
+  foldr f ini (LevelO tree) = go [tree]
+    where
+      go [] = ini
+      go (Nil : xs) = go xs
+      go (Branch l x r : xs) = f x $ go (xs ++ [l, r])
+
+treeToList :: Foldable t => t a -> [a]
+treeToList = foldr (:) []
+
+mkEndo :: Foldable t => t (a -> a) -> Endo a
+mkEndo = foldMap Endo
+
+-- infixr 9 |.|
+-- newtype (|.|) f g a = Cmps
+--   { getCmps :: f (g a)
+--   } deriving (Show, Eq)
+
+instance (Foldable f, Foldable g) => Foldable (f |.| g) where
+  foldMap f (Cmps c) = foldMap (foldMap f) c
+
+traverse2list :: (Foldable t, Applicative f) => (a -> f b) -> t a -> f [b]
+traverse2list f = foldr (\x y -> (:) <$> f x <*> y) $ pure []
+
+-- data Triple a = Tr a a a
+--   deriving (Eq, Show)
+
+-- instance Functor Triple where
+--   fmap f (Tr a b c) = Tr (f a) (f b) (f c)
+
+instance Traversable Triple where
+  traverse f (Tr a b c) = Tr <$> f a <*> f b <*> f c
+
+data Result a
+  = Ok a
+  | Error String
+  deriving (Eq, Show)
+
+instance Foldable Result where
+  foldr _ ini (Error _) = ini
+  foldr f ini (Ok result) = f result ini
+
+instance Functor Result where
+  fmap _ (Error err) = Error err
+  fmap f (Ok result) = Ok $ f result
+
+instance Traversable Result where
+  traverse _ (Error err) = pure $ Error err
+  traverse f (Ok result) = Ok <$> f result
+
+-- data Tree a
+--   = Nil
+--   | Branch (Tree a) a (Tree a)
+--   deriving (Eq, Show)
+
+-- instance Traversable Tree where
+--   traverse _ Nil = pure Nil
+--   traverse f (Branch l x r) = Branch <$> traverse f l <*> f x <*> traverse f r
+
+-- infixr 9 |.|
+-- newtype (|.|) f g a = Cmps
+--   { getCmps :: f (g a)
+--   } deriving (Show, Eq)
+
+instance (Traversable f, Traversable g) => Traversable (f |.| g) where
+  traverse f (Cmps c) = Cmps <$> traverse (traverse f) c
+
+-- (Applicative f, Applicative g, Traversable t) => t (f (g a)) -> Compose f g (t a)
+-- sequenceA . fmap Compose == Compose . fmap sequenceA . sequenceA
+
+-- sequenceA :: (Traversable t, Applicative f) => t (f a) -> f (t a)
+-- fmap :: Functor f => (a -> b) -> f a -> f b
+-- fmap sequenceA :: f (t (g a)) -> f (g (t a))
+
+data OddC a
+  = Un a
+  | Bi a a (OddC a)
+  deriving (Eq, Show)
+
+instance Functor OddC where
+  fmap f (Un a) = Un $ f a
+  fmap f (Bi a b c) = Bi (f a) (f b) $ f <$> c
+
+instance Foldable OddC where
+  foldr f ini (Un a) = f a ini
+  foldr f ini (Bi a b c) = f a $ f b $ foldr f ini c
+
+instance Traversable OddC where
+  traverse f (Un a) = Un <$> f a
+  traverse f (Bi a b c) = Bi <$> f a <*> f b <*> traverse f c
+
+newtype Temperature a = Temperature Double
+  deriving (Num, Fractional, Eq, Show)
+
+data Celsius
+data Fahrenheit
+data Kelvin
+
+comfortTemperature :: Temperature Celsius
+comfortTemperature = Temperature 23
+
+c2f :: Temperature Celsius -> Temperature Fahrenheit
+c2f (Temperature c) = Temperature (1.8 * c + 32)
+
+k2c :: Temperature Kelvin -> Temperature Celsius
+k2c (Temperature c) = Temperature $ c - 273.15
+
+-- data Tree a
+--   = Nil
+--   | Branch (Tree a) a (Tree a)
+--   deriving (Eq, Show)
+
+instance Foldable Tree where
+  foldMap = foldMapDefault
+
+instance Traversable Tree where
+  sequenceA Nil = pure Nil
+  sequenceA (Branch l x r) =
+    flip <$> (Branch <$> sequenceA l) <*> sequenceA r <*> x
+
+-- newtype PrsE a = PrsE
+--   { runPrsE :: String -> Either String (a, String)
+--   }
+
+instance Monad PrsE where
+  (PrsE m) >>= f = PrsE $ \s ->
+    case m s of
+      Left err -> Left err
+      Right (v, s') ->
+        case (runPrsE $ f v) s' of
+          Left err -> Left err
+          Right (v', s'') -> Right (v', s'')
+
+concat3OC :: OddC a -> OddC a -> OddC a -> OddC a
+concat3OC (Un a) (Un b) c = Bi a b c
+concat3OC (Un a) (Bi b1 b2 b3) c = Bi a b1 $ concat3OC (Un b2) b3 c
+concat3OC (Bi a1 a2 a3) b c = Bi a1 a2 $ concat3OC a3 b c
+
+concatOC :: OddC (OddC a) -> OddC a
+concatOC (Un a) = a
+concatOC (Bi a1 a2 a3) = concat3OC a1 a2 $ concatOC a3
+
+instance Applicative OddC where
+  pure = Un
+  (<*>) = ap
+
+instance Monad OddC where
+  (Un a1) >>= f = f a1
+  (Bi a1 a2 a3) >>= f = concat3OC (f a1) (f a2) (a3 >>= f)
+
+-- (u <|> v) <*> w       =    u <*> w <|> v <*> w
+-- 1. We know, that for (<*>) if there are any Nothing, the result will be Nothing.
+-- 2. We know, that for (<|>) the result be first not Nothing if exists, or Nothing.
+-- 3. if w is Nothing, then result will be Nothing.
+-- 4. if u is Just, then left part will be (u <*> w) and right part will be same.
+-- 5. if u is Nothing, then left part will be (v <*> w) and right part will be same.
+-- 6. Hence, (u <|> v) <*> w == u <*> w <|> v <*> w
+
+-- u1, u2 :: Maybe (Int -> Int)
+-- u1 = Just $ \a -> a ^ 2
+-- u2 = Nothing
+-- v1, v2 :: Maybe (Int -> Int)
+-- v1 = Just $ \a -> a ^ 3
+-- v2 = Nothing
+-- k1, k2 :: Maybe Int
+-- k1 = Just 3
+-- k2 = Nothing
+-- test1 = ((u1 <|> v1) <*> k1) == ((u1 <*> k1) <|> (v1 <*> k1))
+-- test2 = ((u1 <|> v1) <*> k2) == ((u1 <*> k2) <|> (v1 <*> k2))
+-- test3 = ((u1 <|> v2) <*> k1) == ((u1 <*> k1) <|> (v2 <*> k1))
+-- test4 = ((u1 <|> v2) <*> k2) == ((u1 <*> k2) <|> (v2 <*> k2))
+-- test5 = ((u2 <|> v1) <*> k1) == ((u2 <*> k1) <|> (v1 <*> k1))
+-- test6 = ((u2 <|> v1) <*> k2) == ((u2 <*> k2) <|> (v1 <*> k2))
+-- test7 = ((u2 <|> v2) <*> k1) == ((u2 <*> k1) <|> (v2 <*> k1))
+-- test8 = ((u2 <|> v2) <*> k2) == ((u2 <*> k2) <|> (v2 <*> k2))
+
+-- (u `mplus` v) >>= k   =    (u >>= k) `mplus` (v >>= k)
+-- u1, u2 :: Maybe Int
+-- u1 = Just 2
+-- u2 = Nothing
+-- v1, v2 :: Maybe Int
+-- v1 = Just 3
+-- v2 = Nothing
+-- k1, k2 :: Int -> Maybe Int
+-- k1 a = Just $ a ^ 2
+-- k2 _ = Nothing
+-- test1 = ((u1 `mplus` v1) >>= k1) == ((u1 >>= k1) `mplus` (v1 >>= k1))
+-- test2 = ((u1 `mplus` v1) >>= k2) == ((u1 >>= k2) `mplus` (v1 >>= k2))
+-- test3 = ((u1 `mplus` v2) >>= k1) == ((u1 >>= k1) `mplus` (v2 >>= k1))
+-- test4 = ((u1 `mplus` v2) >>= k2) == ((u1 >>= k2) `mplus` (v2 >>= k2))
+-- test5 = ((u2 `mplus` v1) >>= k1) == ((u2 >>= k1) `mplus` (v1 >>= k1))
+-- test6 = ((u2 `mplus` v1) >>= k2) == ((u2 >>= k2) `mplus` (v1 >>= k2))
+-- test7 = ((u2 `mplus` v2) >>= k1) == ((u2 >>= k1) `mplus` (v2 >>= k1))
+-- test8 = ((u2 `mplus` v2) >>= k2) == ((u2 >>= k2) `mplus` (v2 >>= k2))
+
+newtype PrsEP a = PrsEP
+  { runPrsEP :: Int -> String -> (Int, Either String (a, String))
+  }
+
+parseEP :: PrsEP a -> String -> Either String (a, String)
+parseEP p  = snd . runPrsEP p 0
+
+satisfyEP :: (Char -> Bool) -> PrsEP Char
+satisfyEP p = PrsEP $ \pos ->
+  let nextPos = pos + 1
+  in \case
+  "" -> (nextPos, Left $ "pos " ++ show nextPos ++ ": unexpected end of input")
+  (x:xs) ->
+    if p x
+    then (nextPos, Right (x, xs))
+    else (nextPos, Left $ "pos " ++ show nextPos ++ ": unexpected " ++ [x])
+
+charEP :: Char -> PrsEP Char
+charEP c = satisfyEP (== c)
+
+instance Functor PrsEP where
+  fmap f (PrsEP p) = PrsEP $ fmap (\(pos, res) ->
+    case res of
+      Left err -> (pos, Left err)
+      Right (x, xs) -> (pos, Right (f x, xs))
+    ) . p
+
+instance Applicative PrsEP where
+  pure a = PrsEP $ \pos s -> (pos, Right (a, s))
+  PrsEP f <*> PrsEP p = PrsEP $ \pos s ->
+    case f pos s of
+      (pos', Left err) -> (pos', Left err)
+      (pos', Right (g, s')) -> case p pos' s' of
+        (newPos, Left err) -> (newPos, Left err)
+        (newPos, Right (x, xs)) -> (newPos, Right (g x, xs))
+
+instance Alternative PrsEP where
+  empty = PrsEP $ \pos s -> (pos, Left $ "pos " ++ show pos ++ ": empty alternative")
+  PrsEP f <|> PrsEP p = PrsEP $ \pos s ->
+    case f pos s of
+      lr@(_, Right _) -> lr
+      ll@(leftPos, Left _) -> case p pos s of
+        rr@(_, Right _) -> rr
+        rl@(rightPos, Left _) -> if leftPos >= rightPos then ll else rl
