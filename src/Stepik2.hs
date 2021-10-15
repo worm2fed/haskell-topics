@@ -1,5 +1,6 @@
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes#-}
 {-# LANGUAGE TypeOperators #-}
@@ -7,10 +8,17 @@
 module Stepik2 where
 
 -- import Text.Parsec (Parsec, char, digit, many1, sepBy)
-import Control.Applicative (ZipList(..), (<**>), Alternative(empty, (<|>)))
-import Control.Monad (ap, MonadPlus (mplus))
-import Data.Char (isDigit)
+import Control.Applicative (ZipList(..), (<**>), Alternative(empty, (<|>)), Applicative (liftA2))
+import Control.Monad (ap, MonadPlus (mplus), liftM, forM, when)
+import Control.Monad.Trans (lift, MonadTrans)
+import Control.Monad.Trans.Cont (Cont, runCont, cont)
+import Control.Monad.Trans.Except (Except, except, throwE, runExceptT, withExcept, runExcept, ExceptT)
+import Control.Monad.Trans.Reader (Reader, asks, ReaderT (..), ask)
+import Control.Monad.Trans.State (State, get, put, runState, execState, StateT (runStateT), execStateT)
+import Control.Monad.Trans.Writer (WriterT (..), tell, Writer, runWriter)
+import Data.Char (isDigit, toUpper)
 import Data.Monoid (Any(..), All (..), Endo(..), Last (..))
+import Data.Semigroup (Semigroup(..))
 import Data.Traversable (foldMapDefault)
 import Text.Parsec (Parsec)
 
@@ -245,14 +253,14 @@ type A   = ((,) Integer |.| (,) Char) Bool
 type B t = ((,,) Bool (t -> t) |.| Either String) Int
 type C   = (|.|) ((->) Bool) ((->) Integer) Integer
 
-a :: A
-a = Cmps (4, ('2', True))
+a' :: A
+a' = Cmps (4, ('2', True))
 
-b :: B t
-b = Cmps (False, id, Right 42)
+b' :: B t
+b' = Cmps (False, id, Right 42)
 
-c :: C
-c  = Cmps $ \_ _ -> 42
+c' :: C
+c'  = Cmps $ \_ _ -> 42
 
 newtype Cmps3 f g h a = Cmps3
   { getCmps3 :: f (g (h a))
@@ -597,3 +605,333 @@ instance Alternative PrsEP where
       ll@(leftPos, Left _) -> case p pos s of
         rr@(_, Right _) -> rr
         rl@(rightPos, Left _) -> if leftPos >= rightPos then ll else rl
+
+
+-- Monads and Effects
+
+
+-- withExcept :: (e -> e') -> Except e a -> Except e' a
+-- withExcept f (Except (Left err)) = Except . Left $ f err
+-- withExcept _ (Except (Right res)) = Except $ Right res
+
+data ListIndexError = ErrIndexTooLarge Int | ErrNegativeIndex
+  deriving (Show, Eq)
+
+infixl 9 !!!
+(!!!) :: [a] -> Int -> Except ListIndexError a
+xs !!! i
+  | i < 0 = throwE ErrNegativeIndex
+  | null $ drop i xs = throwE $ ErrIndexTooLarge i
+  | otherwise = return $ xs !! i
+
+data ReadError = EmptyInput | NoParse String
+  deriving Show
+
+tryRead :: Read a => String -> Except ReadError a
+tryRead "" = throwE EmptyInput
+tryRead s = case reads s of
+  [(x, "")] -> return x
+  _ -> throwE $ NoParse s
+
+data SumError = SumError Int ReadError
+  deriving Show
+
+trySum :: [String] -> Except SumError Integer
+trySum xs = sum <$> traverse traverseF (zip [1..] xs)
+  where
+    traverseF :: (Int, String) -> Except SumError Integer
+    traverseF (i, x) = SumError i `withExcept` tryRead x
+
+newtype SimpleError = Simple
+  { getSimple :: String
+  } deriving (Show, Eq)
+
+instance Semigroup SimpleError where
+  (Simple s1) <> (Simple s2) = Simple $ s1 <> s2
+
+instance Monoid SimpleError where
+  mempty = Simple ""
+
+lie2se :: ListIndexError -> SimpleError
+lie2se (ErrIndexTooLarge i) = Simple $ "[index (" ++ show i ++ ") is too large]"
+lie2se ErrNegativeIndex = Simple "[negative index]"
+
+newtype Validate e a = Validate
+  { getValidate :: Either [e] a
+  }
+
+instance Functor (Validate e) where
+  fmap f (Validate x) = Validate $ f <$> x
+
+instance Applicative (Validate e) where
+  pure = Validate . pure
+  (Validate f) <*> (Validate x) = Validate $ f <*> x
+
+collectE :: Except e a -> Validate e a
+collectE e = case runExcept e of
+  Right r -> Validate $ Right r
+  Left l  -> Validate $ Left [l]
+
+validateSum :: [String] -> Validate SumError Integer
+validateSum xs = Validate $ foldr calculate (Right 0) $ prepare <$> zip [1..] xs
+  where
+    calculate (Validate x) res = case x of
+      Left err -> either (\v -> Left $ err <> v) (\_ -> Left err) res
+      Right x -> either Left (\v -> Right $ v + x) res
+
+    prepare :: (Int, String) -> Validate SumError Integer
+    prepare (i, x) = collectE $ SumError i `withExcept` tryRead x
+
+decode :: (Int -> r) -> r
+decode c = c 0
+
+as, a :: Int -> (Int -> r) -> r
+as n c = c n
+a n c = c n
+
+number :: a -> a
+number = id
+
+twenty, hundred, thousand, seventeen, one, two, three :: Int -> (Int -> r) -> r
+twenty n c = c $ 20 + n
+hundred n c = c $ 100 * n
+thousand n c = c $ 1000 * n
+seventeen n c = c $ n + 17
+one n c = c $ n + 1
+two n c = c $ n + 2
+three n c = c $ n + 3
+
+showCont :: Show a => Cont String a -> String
+showCont m = runCont m show
+
+addTens :: Int -> Checkpointed Int
+addTens x1 checkpoint = do
+  checkpoint x1
+  let x2 = x1 + 10
+  checkpoint x2     {- x2 = x1 + 10 -}
+  let x3 = x2 + 10
+  checkpoint x3     {- x3 = x1 + 20 -}
+  let x4 = x3 + 10
+  return x4         {- x4 = x1 + 30 -}
+
+type Checkpointed a = (a -> Cont a a) -> Cont a a
+
+runCheckpointed :: (a -> Bool) -> Checkpointed a -> a
+runCheckpointed p checkpointed = runCont check id
+  where
+    check = checkpointed $ \v -> cont $ \c -> if p (c v) then c v else v
+
+newtype FailCont r e a = FailCont
+  { runFailCont :: (a -> r) -> (e -> r) -> r
+  }
+
+instance Functor (FailCont r e) where
+  fmap = liftM
+
+instance Applicative (FailCont r e) where
+  pure x = FailCont $ \ok _ -> ok x
+  (<*>) = ap
+
+instance Monad (FailCont r e) where
+  FailCont fc >>= k = FailCont $ \ok notOk ->
+    fc (\ok' -> runFailCont (k ok') ok notOk) notOk
+
+toFailCont :: Except e a -> FailCont r e a
+toFailCont ex = case runExcept ex of
+  Left err -> FailCont $ \_ notOk -> notOk err
+  Right v -> FailCont $ \ok _ -> ok v
+
+evalFailCont :: FailCont (Either e a) e a -> Either e a
+evalFailCont ex = runFailCont ex Right Left
+
+add :: Int -> Int -> FailCont r e Int
+add x y = FailCont $ \ok _ -> ok $ x + y
+
+addInts :: String -> String -> FailCont r ReadError Int
+addInts s1 s2 = do
+  i1 <- toFailCont $ tryRead s1
+  i2 <- toFailCont $ tryRead s2
+  return $ i1 + i2
+
+callCFC :: ((a -> FailCont r e b) -> FailCont r e a) -> FailCont r e a
+callCFC f = FailCont $ \ok notOk ->
+  runFailCont (f $ \a -> FailCont $ \_ _ -> ok a) ok notOk
+
+logFirstAndRetSecond :: WriterT String (Reader [String]) String
+logFirstAndRetSecond = do
+  el1 <- lift $ asks head
+  el2 <- lift $ asks (map toUpper . head . tail)
+  tell el1
+  return el2
+
+separate :: (a -> Bool) -> (a -> Bool) -> [a] -> WriterT [a] (Writer [a]) [a]
+separate p1 p2 xs = do
+  tell $ filter p1 xs
+  lift . tell $ filter p2 xs
+  return $ filter (\x -> not (p1 x) && not (p2 x)) xs
+
+type MyRW = ReaderT [String] (Writer String)
+
+runMyRW :: MyRW a -> [String] -> (a, String)
+runMyRW rw e = runWriter $ runReaderT rw e
+
+logFirstAndRetSecondMyRW :: MyRW String
+logFirstAndRetSecondMyRW = do
+  el1 <- myAsks head
+  el2 <- myAsks (map toUpper . head . tail)
+  myTell el1
+  return el2
+
+myRWAsks :: ([String] -> a) -> MyRW a
+myRWAsks = asks
+
+myRWTell :: String -> MyRW ()
+myRWTell = lift . tell
+
+type MyRWT m = ReaderT [String] (WriterT String m)
+
+runMyRWT :: MyRWT m a -> [String] -> m (a, String)
+runMyRWT rw e = runWriterT $ runReaderT rw e
+
+myAsks :: Monad m => ([String] -> a) -> MyRWT m a
+myAsks = asks
+
+myTell :: Monad m => String -> MyRWT m ()
+myTell = lift . tell
+
+myLift :: Monad m => m a -> MyRWT m a
+myLift = lift . lift
+
+logFirstAndRetSecondMyRWT :: MyRWT IO String
+logFirstAndRetSecondMyRWT = do
+  el1 <- myAsks head
+  myLift $ putStrLn $ "First is " ++ show el1
+  el2 <- myAsks (map toUpper . head . tail)
+  myLift $ putStrLn $ "Second is " ++ show el2
+  myTell el1
+  return el2
+
+logFirstAndRetSecondSafe :: MyRWT Maybe String
+logFirstAndRetSecondSafe = do
+  xs <- ask
+  case xs of
+    (el1 : el2 : _) -> myTell el1 >> return (map toUpper el2)
+    _ -> myLift Nothing
+
+veryComplexComputation :: MyRWT Maybe (String, String)
+veryComplexComputation = do
+  xs <- ask
+  let eXs = take 2 [x | x <- xs, even $ length x]
+  let oXs = take 2 [x | x <- xs, odd $ length x]
+  when (length eXs < 2 || length oXs < 2) $ myLift Nothing
+  myTell (head eXs) >> myTell "," >> myTell (head oXs)
+  return (up eXs, up oXs)
+  where
+    up = map toUpper . head . tail
+
+tickCollatz :: State Integer Integer
+tickCollatz = do
+  n <- get
+  let res = if odd n then 3 * n + 1 else n `div` 2
+  put res
+  return n
+
+type EsSi = ExceptT String (State Integer)
+
+runEsSi :: EsSi a -> Integer -> (Either String a, Integer)
+runEsSi computation = runState (runExceptT computation)
+
+go :: Integer -> Integer -> State Integer Integer -> EsSi ()
+go low high action = do
+  v <- lift get
+  lift . put $ execState action v
+  current <- lift get
+  when (current <= low) $ throwE "Lower bound"
+  when (current >= high) $ throwE "Upper bound"
+
+type RiiEsSiT m = ReaderT (Integer, Integer) (ExceptT String (StateT Integer m))
+
+runRiiEsSiT
+  :: ReaderT (Integer, Integer) (ExceptT String (StateT Integer m)) a
+  -> (Integer, Integer)
+  -> Integer
+  -> m (Either String a, Integer)
+runRiiEsSiT computation e = runStateT (runExceptT $ runReaderT computation e)
+
+go' :: Monad m => StateT Integer m Integer -> RiiEsSiT m ()
+go' action = do
+  (low, high) <- ask
+  v <- lift $ lift get
+  current <- lift . lift . lift $ execStateT action v
+  lift . lift . put $ current
+  when (current <= low) $ lift $ throwE "Lower bound"
+  when (current >= high) $ lift $ throwE "Upper bound"
+
+tickCollatz' :: StateT Integer IO Integer
+tickCollatz' = do
+  n <- get
+  let res = if odd n then 3 * n + 1 else n `div` 2
+  lift $ putStrLn $ show res
+  put res
+  return n
+
+-- newtype Arr2 e1 e2 a = Arr2 { getArr2 :: e1 -> e2 -> a }
+newtype Arr2T e1 e2 m a = Arr2T
+  { getArr2T :: e1 -> e2 -> m a
+  }
+
+-- newtype Arr3 e1 e2 e3 a = Arr3 { getArr3 :: e1 -> e2 -> e3 -> a }
+newtype Arr3T e1 e2 e3 m a = Arr3T
+  { getArr3T :: e1 -> e2 -> e3 -> m a
+  }
+
+arr2 :: Monad m => (e1 -> e2 -> a) -> Arr2T e1 e2 m a
+arr2 f = Arr2T $ \e1 -> return . f e1
+
+arr3 :: Monad m => (e1 -> e2 -> e3 -> a) -> Arr3T e1 e2 e3 m a
+arr3 f = Arr3T $ \e1 e2 -> return . f e1 e2
+
+instance Functor m => Functor (Arr2T e1 e2 m) where
+  fmap :: (a -> b) -> Arr2T e1 e2 m a -> Arr2T e1 e2 m b
+  fmap f tr = Arr2T $ \e1 -> fmap f . getArr2T tr e1
+
+instance Functor m => Functor (Arr3T e1 e2 e3 m) where
+  fmap :: (a -> b) -> Arr3T e1 e2 e3 m a -> Arr3T e1 e2 e3 m b
+  fmap f tr = Arr3T $ \e1 e2 -> fmap f . getArr3T tr e1 e2
+
+instance Applicative m => Applicative (Arr2T e1 e2 m) where
+  pure :: a -> Arr2T e1 e2 m a
+  pure x = Arr2T $ \_ _ -> pure x
+
+  (<*>) :: Arr2T e1 e2 m (a -> b) -> Arr2T e1 e2 m a -> Arr2T e1 e2 m b
+  f <*> v = Arr2T $ \e1 -> liftA2 (<*>) (getArr2T f e1) (getArr2T v e1)
+
+instance Applicative m => Applicative (Arr3T e1 e2 e3 m) where
+  pure :: a -> Arr3T e1 e2 e3 m a
+  pure x = Arr3T $ \_ _ _ -> pure x
+
+  (<*>) :: Arr3T e1 e2 e3 m (a -> b) -> Arr3T e1 e2 e3 m a -> Arr3T e1 e2 e3 m b
+  f <*> v = Arr3T $ \e1 e2 -> liftA2 (<*>) (getArr3T f e1 e2) (getArr3T v e1 e2)
+
+instance Monad m => Monad (Arr2T e1 e2 m) where
+  (>>=) :: Arr2T e1 e2 m a -> (a -> Arr2T e1 e2 m b) -> Arr2T e1 e2 m b
+  m >>= k = Arr2T $ \e1 e2 -> do
+    v <- getArr2T m e1 e2
+    getArr2T (k v) e1 e2
+
+instance Monad m => Monad (Arr3T e1 e2 e3 m) where
+  (>>=) :: Arr3T e1 e2 e3 m a -> (a -> Arr3T e1 e2 e3  m b) -> Arr3T e1 e2 e3 m b
+  m >>= k = Arr3T $ \e1 e2 e3 -> do
+    v <- getArr3T m e1 e2 e3
+    getArr3T (k v) e1 e2 e3
+
+instance MonadFail m => MonadFail (Arr3T e1 e2 e3 m) where
+  fail :: String -> Arr3T e1 e2 e3 m a
+  fail s = Arr3T $ \_ _ _ -> fail s
+
+instance MonadTrans (Arr2T e1 e2) where
+  lift :: Monad m => m a -> Arr2T e1 e2 m a
+  lift m = Arr2T $ \_ _ -> m
+
+asks2 :: Monad m => (e1 -> e2 -> a) -> Arr2T e1 e2 m a
+asks2 f = Arr2T $ \e1 e2 -> return $ f e1 e2

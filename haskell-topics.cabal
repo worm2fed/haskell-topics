@@ -28,3 +28,5 @@ library
       base
     , bytestring
     , parsec
+    , transformers
+    , mtl
