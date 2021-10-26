@@ -1,27 +1,44 @@
 {-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes#-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Stepik2 where
 
+import qualified Control.Monad.Reader as Rdr
+import qualified Control.Monad.State as St
+import qualified Control.Monad.Writer as Wr
+
 -- import Text.Parsec (Parsec, char, digit, many1, sepBy)
-import Control.Applicative (ZipList(..), (<**>), Alternative(empty, (<|>)), Applicative (liftA2))
-import Control.Monad (ap, MonadPlus (mplus), liftM, forM, when)
-import Control.Monad.Trans (lift, MonadTrans)
-import Control.Monad.Trans.Cont (Cont, runCont, cont)
-import Control.Monad.Trans.Except (Except, except, throwE, runExceptT, withExcept, runExcept, ExceptT)
-import Control.Monad.Trans.Reader (Reader, asks, ReaderT (..), ask)
-import Control.Monad.Trans.State (State, get, put, runState, execState, StateT (runStateT), execStateT)
-import Control.Monad.Trans.Writer (WriterT (..), tell, Writer, runWriter)
-import Data.Char (isDigit, toUpper)
-import Data.Monoid (Any(..), All (..), Endo(..), Last (..))
+import Data.Char (isDigit, toUpper, isNumber, isPunctuation)
+import Data.Foldable (traverse_)
+import Data.Monoid (Any(..), All (..), Endo(..), Last (..), Sum (..))
 import Data.Semigroup (Semigroup(..))
 import Data.Traversable (foldMapDefault)
 import Text.Parsec (Parsec)
+import Control.Applicative (ZipList(..), (<**>), Alternative(empty, (<|>)), Applicative (..))
+import Control.Monad (ap, MonadPlus (mplus), liftM, forM, when, (>=>), guard, msum, unless, (<=<))
 
+import Control.Monad.Except (MonadError (..))
+import Control.Monad.Identity (Identity (..))
+import Control.Monad.Reader (MonadReader)
+import Control.Monad.State (MonadState)
+import Control.Monad.Writer (MonadWriter)
+
+import Control.Monad.Trans (MonadTrans(..), liftIO)
+import Control.Monad.Trans.Cont (Cont, runCont, cont)
+import Control.Monad.Trans.Except (Except, except, throwE, runExceptT, withExcept, runExcept, ExceptT (..))
+import Control.Monad.Trans.Maybe (MaybeT)
+import Control.Monad.Trans.Reader (Reader, asks, ReaderT (..), ask)
+import Control.Monad.Trans.State (State, get, put, state, gets, runState, execState, StateT (..), execStateT, modify, evalStateT)
+import Control.Monad.Trans.Writer (WriterT (..), tell, Writer, runWriter)
 
 -- Applicative Functors
 
@@ -935,3 +952,451 @@ instance MonadTrans (Arr2T e1 e2) where
 
 asks2 :: Monad m => (e1 -> e2 -> a) -> Arr2T e1 e2 m a
 asks2 f = Arr2T $ \e1 e2 -> return $ f e1 e2
+
+
+-- Monad Transformers
+
+
+data Logged a = Logged String a
+  deriving (Eq, Show)
+
+newtype LoggT m a = LoggT
+  { runLoggT :: m (Logged a)
+  }
+
+instance Functor m => Functor (LoggT m) where
+  fmap :: (a -> b) -> LoggT m a -> LoggT m b
+  fmap f = LoggT . fmap updater . runLoggT
+    where
+      updater ~(Logged log x) = Logged log $ f x
+
+instance Applicative m => Applicative (LoggT m) where
+  pure :: a -> LoggT m a
+  pure x = LoggT . pure $ Logged "" x
+
+  (<*>) :: LoggT m (a -> b) -> LoggT m a -> LoggT m b
+  f <*> v = LoggT $ liftA2 updater (runLoggT f) (runLoggT v)
+    where
+      updater ~(Logged w g) ~(Logged w' x) = Logged (w <> w') $ g x
+
+instance Monad m => Monad (LoggT m) where
+  (>>=) :: LoggT m a -> (a -> LoggT m b) -> LoggT m b
+  m >>= k = LoggT $ do
+    ~(Logged w v) <- runLoggT m
+    ~(Logged w' v') <- runLoggT (k v)
+    return $ Logged (w <> w') v'
+
+instance MonadFail m => MonadFail (LoggT m) where
+  fail :: String -> LoggT m a
+  fail = LoggT . fail
+
+logTst :: LoggT Identity Integer
+logTst = do
+  x <- LoggT $ Identity $ Logged "AAA" 30
+  y <- return 10
+  z <- LoggT $ Identity $ Logged "BBB" 2
+  return $ x + y + z
+
+failTst :: [Integer] -> LoggT [] Integer
+failTst xs = do
+  5 <- LoggT $ fmap (Logged "") xs
+  LoggT [Logged "A" ()]
+  return 42
+
+write2log :: Monad m => String -> LoggT m ()
+write2log w = LoggT . return $ Logged w ()
+
+type Logg = LoggT Identity
+
+runLogg :: Logg a -> Logged a
+runLogg = runIdentity . runLoggT
+
+logTst' :: Logg Integer
+logTst' = do
+  write2log "AAA"
+  write2log "BBB"
+  return 42
+
+stLog :: StateT Integer Logg Integer
+stLog = do
+  modify (+1)
+  a <- get
+  lift $ write2log $ show $ a * 10
+  put 42
+  return $ a * 100
+
+instance MonadTrans LoggT where
+  lift :: Monad m => m a -> LoggT m a
+  lift m = LoggT $ Logged "" <$> m
+
+logSt :: LoggT (State Integer) Integer
+logSt = do
+  lift $ modify (+1)
+  a <- lift get
+  write2log $ show $ a * 10
+  lift $ put 42
+  return $ a * 100
+
+newtype MyStateT s m a = MyStateT
+  { runMyStateT :: s -> m (a, s)
+  }
+
+myState :: Monad m => (s -> (a, s)) -> MyStateT s m a
+myState f = MyStateT (return . f)
+
+myEvalStateT :: Monad m => MyStateT s m a -> s -> m a
+myEvalStateT stT = do
+  st <- runMyStateT stT
+  return $ fst <$> st
+
+myExecStateT :: Monad m => MyStateT s m a -> s -> m s
+myExecStateT stT = do
+  st <- runMyStateT stT
+  return $ snd <$> st
+
+readerToMyStateT :: Monad m => ReaderT r m a -> MyStateT r m a
+readerToMyStateT rdr = MyStateT $ \r -> do
+  val <- runReaderT rdr r
+  return (val, r)
+
+instance Functor m => Functor (MyStateT s m) where
+  fmap :: (a -> b) -> MyStateT s m a -> MyStateT s m b
+  fmap f m = MyStateT $ \st -> fmap updater $ runMyStateT m st
+    where updater ~(x, s) = (f x, s)
+
+instance Monad m => Applicative (MyStateT s m) where
+  pure :: a -> MyStateT s m a
+  pure x = MyStateT $ \ s -> return (x, s)
+
+  (<*>) :: MyStateT s m (a -> b) -> MyStateT s m a -> MyStateT s m b
+  f <*> v = MyStateT $ \ s -> do
+      ~(g, s') <- runMyStateT f s
+      ~(x, s'') <- runMyStateT v s'
+      return (g x, s'')
+
+instance Monad m => Monad (MyStateT s m) where
+  (>>=) :: MyStateT s m a -> (a -> MyStateT s m b) -> MyStateT s m b
+  m >>= k  = MyStateT $ \s -> do
+    ~(x, s') <- runMyStateT m s
+    runMyStateT (k x) s'
+
+instance MonadFail m => MonadFail (MyStateT s m) where
+  fail :: String -> MyStateT s m a
+  fail s = MyStateT $ \_ -> fail s
+
+data MyTree a
+  = Leaf a
+  | Fork (MyTree a) a (MyTree a)
+  deriving Show
+
+numberAndCount :: MyTree () -> (MyTree Integer, Integer)
+numberAndCount t = getSum <$> runWriter (evalStateT (go t) 1)
+  where
+    go :: MyTree () -> StateT Integer (Writer (Sum Integer)) (MyTree Integer)
+    go (Leaf _) = do
+      st <- get
+      lift $ tell 1
+      put $ succ st
+      return $ Leaf st
+    go (Fork left _ right) = do
+      l <- go left
+      st <- get
+      put $ succ st
+      r <- go right
+      return $ Fork l st r
+
+data Tile = Floor | Chasm | Snake
+  deriving Show
+
+data DeathReason = Fallen | Poisoned
+  deriving (Eq, Show)
+
+type Point = (Integer, Integer)
+type GameMap = Point -> Tile
+
+moves :: GameMap -> Int -> Point -> [Either DeathReason Point]
+moves game n start = runExceptT $
+  foldr (>=>) return (replicate n $ ExceptT . move) start
+  where
+    step :: Point -> [Point]
+    step (x, y) = [(x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)]
+
+    outcome :: Point -> Either DeathReason Point
+    outcome move = case game move of
+      Floor -> Right move
+      Chasm -> Left Fallen
+      Snake -> Left Poisoned
+
+    move :: Point -> [Either DeathReason Point]
+    move point = outcome <$> step point
+
+waysToDie :: DeathReason -> GameMap -> Int -> Point -> Int
+waysToDie reason game n start = length . filter filterF $ moves game n start
+  where
+    filterF (Right _) = False
+    filterF (Left d)
+      | d == reason = True
+      | otherwise = False
+
+map1 :: GameMap
+map1 (2, 2) = Snake
+map1 (4, 1) = Snake
+map1 (x, y)
+  | 0 < x && x < 5 && 0 < y && y < 5 = Floor
+  | otherwise                        = Chasm
+
+newtype PwdError = PwdError String
+
+type PwdErrorIOMonad = ExceptT PwdError IO
+
+instance Semigroup PwdError where
+  PwdError a <> PwdError b = PwdError $ a <> b
+
+instance Monoid PwdError where
+  mempty = PwdError ""
+
+askPassword :: PwdErrorIOMonad ()
+askPassword = do
+  liftIO $ putStrLn "Enter your new password:"
+  value <- msum $ repeat getValidPassword
+  liftIO $ putStrLn "Storing in database..."
+
+getValidPassword :: PwdErrorIOMonad String
+getValidPassword = do
+  s <- liftIO getLine
+  when (length s < 8) $ do
+    let err = "Incorrect input: password is too short!"
+    liftIO $ putStrLn err
+    throwE $ PwdError err
+  unless (any isNumber s) $ do
+    let err = "Incorrect input: password must contain some digits!"
+    liftIO $ putStrLn err
+    throwE $ PwdError err
+  unless (any isPunctuation s) $ do
+    let err = "Incorrect input: password must contain some punctuation!"
+    liftIO $ putStrLn err
+    throwE $ PwdError err
+  return s
+
+tryReadT :: (Read a, Monad m) => String -> ExceptT ReadError m a
+tryReadT "" = throwE EmptyInput
+tryReadT s = case reads s of
+  [(x, "")] -> return x
+  _ -> throwE $ NoParse s
+
+-- data MyTree a
+--   = Leaf a
+--   | Fork (MyTree a) a (MyTree a)
+--   deriving Show
+
+instance Foldable MyTree where
+  foldr f ini (Leaf x) = f x ini
+  foldr f ini (Fork l x r) = foldr f (f x $ foldr f ini r) l
+
+-- instance Functor Tree where
+--   fmap _ Nil = Nil
+--   fmap f (Branch l x r) = Branch (fmap f l) (f x) (fmap f r)
+
+treeSum :: MyTree String -> (Maybe ReadError, Integer)
+treeSum t =
+  let (err, s) = runWriter . runExceptT $ traverse_ goMyTree t
+  in (maybeErr err, getSum s)
+  where
+    maybeErr :: Either ReadError () -> Maybe ReadError
+    maybeErr = either Just (const Nothing)
+
+goMyTree :: String -> ExceptT ReadError (Writer (Sum Integer)) ()
+goMyTree s = do
+  number <- tryReadT s :: ExceptT ReadError (Writer (Sum Integer)) Integer
+  lift . tell $ Sum number
+  return ()
+
+class Functor' c e | c -> e where
+  fmap' :: (e -> e) -> c -> c
+
+instance Functor' [c] c where
+  fmap' = map
+
+instance Functor' (Maybe c) c where
+  fmap' _ Nothing = Nothing
+  fmap' f (Just a) = Just (f a)
+
+instance MonadState s m => MonadState s (LoggT m) where
+  get = lift St.get
+  put = lift . St.put
+  state = lift . St.state
+
+logSt' :: LoggT (State Integer) Integer
+logSt' = do
+  St.modify (+1)                   -- no lift!
+  a <- St.get                      -- no lift!
+  write2log $ show $ a * 10
+  St.put 42                        -- no lift!
+  return $ a * 100
+
+mapLoggT :: (m (Logged a) -> n (Logged b)) -> LoggT m a -> LoggT n b
+mapLoggT f = LoggT . f . runLoggT
+
+instance MonadReader r m => MonadReader r (LoggT m) where
+  ask = lift Rdr.ask
+  local f m = mapLoggT (Rdr.local f) m
+  reader = lift . Rdr.reader
+
+instance MonadFail Identity where
+  fail = error
+
+logRdr :: LoggT (Reader [(Int,String)]) ()
+logRdr = do
+  Just x <- Rdr.asks $ lookup 2 -- no lift!
+  write2log x
+  Just y <- Rdr.local ((3, "Jim"):) $ Rdr.asks $ lookup 3 -- no lift!
+  write2log y
+
+class Monad m => MonadLogg m where
+  w2log :: String -> m ()
+  logg :: Logged a -> m a
+
+instance Monad m => MonadLogg (LoggT m) where
+  w2log = write2log
+  logg (Logged log x) = write2log log >> return x
+
+logSt'' :: LoggT (State Integer) Integer
+logSt'' = do
+  x <- logg $ Logged "BEGIN " 1
+  St.modify (+x)
+  a <- St.get
+  w2log $ show $ a * 10
+  St.put 42
+  w2log " END"
+  return $ a * 100
+
+instance MonadLogg m => MonadLogg (StateT s m) where
+  w2log = lift . w2log
+  logg  = lift . logg
+
+instance MonadLogg m => MonadLogg (ReaderT r m) where
+  w2log = lift . w2log
+  logg  = lift . logg
+
+rdrStLog :: ReaderT Integer (StateT Integer Logg) Integer
+rdrStLog = do
+  x <- logg $ Logged "BEGIN " 1
+  y <- ask
+  St.modify (+ (x + y))
+  a <- St.get
+  w2log $ show $ a * 10
+  St.put 42
+  w2log " END"
+  return $ a * 100
+
+tryRead' :: (Read a, MonadError ReadError m) => String -> m a
+tryRead' "" = throwError EmptyInput
+tryRead' s = case reads s of
+  [(x, "")] -> return x
+  _ -> throwError $ NoParse s
+
+-- data MyTree a
+--   = Leaf a
+--   | Fork (MyTree a) a (MyTree a)
+--   deriving Show
+
+treeSum' :: MyTree String -> Either ReadError Integer
+treeSum' t =
+  let (err, s) = runWriter . runExceptT $ traverse_ goMyTree' t
+  in case err of
+    Left e -> Left e
+    _ -> Right $ getSum s
+
+goMyTree' :: String -> ExceptT ReadError (Writer (Sum Integer)) ()
+goMyTree' s = do
+  number <- tryRead' s :: ExceptT ReadError (Writer (Sum Integer)) Integer
+  lift . tell $ Sum number
+  return ()
+
+limited
+  :: (Num e, Enum e, MonadState s m, MonadError e m)
+  => (s -> Bool) -> [State s a] -> m [a]
+limited p fs = traverse limit1 (zip [0..] fs)
+  where
+    limit1 (i, f) = do
+      a <- St.state (runState f)
+      stateIsBad <- St.gets (not . p)
+      when stateIsBad $ throwError i
+      pure a
+
+runLimited1 :: (s -> Bool) -> [State s a] -> s -> (Either Int [a], s)
+runLimited1 p fs = run1 (limited p fs)
+
+runLimited2 :: (s -> Bool) -> [State s a] -> s -> Either Int ([a], s)
+runLimited2 p fs = run2 (limited p fs)
+
+run1 :: ExceptT Int (State s) [a] -> s -> (Either Int [a], s)
+run1 computation s = (St.evalState st s, St.execState st s)
+  where
+    st = runExceptT computation
+
+run2 :: StateT s (Either e) [a] -> s -> Either e ([a], s)
+run2 = runStateT
+
+newtype CoroutineT m a = CoroutineT
+  { runCoroutineT :: m (Either (CoroutineT m a) a)
+  }
+
+instance Functor m => Functor (CoroutineT m) where
+  fmap f t = CoroutineT $
+    either (Left . fmap f) (Right . f) <$> runCoroutineT t
+
+instance Monad m => Applicative (CoroutineT m) where
+  pure = return
+  (<*>) = ap
+
+instance Monad m => Monad (CoroutineT m) where
+  return = CoroutineT . return . Right
+  t >>= f = CoroutineT $ runCoroutineT t >>=
+    either (return . Left . (>>= f)) (runCoroutineT . f)
+
+instance MonadFail m => MonadFail (CoroutineT m) where
+  fail msg = CoroutineT $ Right <$> fail msg
+
+instance MonadTrans CoroutineT where
+  lift = CoroutineT . liftM Right
+
+instance MonadWriter w m => MonadWriter w (CoroutineT m) where
+  tell = lift . Wr.tell
+  listen m = CoroutineT $ do
+    (c, w) <- Wr.listen (runCoroutineT m)
+    either (return . Left . Wr.listen) (\a -> return $ Right (a, w)) c
+  pass m = CoroutineT $ do
+    (c, w) <- Wr.listen (runCoroutineT m)
+    either (return . Left . Wr.pass) (\(a, f) -> Wr.tell (f w) >> return (Right a)) c
+
+yield :: Monad m => CoroutineT m ()
+yield = CoroutineT (return . Left $ return ())
+
+run :: Monad m => CoroutineT m a -> m a
+run c = runCoroutineT c >>= either run return
+
+runCoroutines :: Monad m => CoroutineT m () -> CoroutineT m () -> m ()
+runCoroutines c1 c2 = do
+  first <- runCoroutineT c1
+  case first of
+    Left c -> runCoroutines c2 c
+    Right r -> run c2
+
+coroutine3 :: CoroutineT (Writer String) ()
+coroutine3 = do
+  Wr.tell "1"
+  yield
+  yield
+  Wr.tell "2"
+
+coroutine4 :: CoroutineT (Writer String) ()
+coroutine4 = do
+  Wr.tell "a"
+  yield
+  Wr.tell "b"
+  yield
+  Wr.tell "c"
+  yield
+  Wr.tell "d"
+  yield
